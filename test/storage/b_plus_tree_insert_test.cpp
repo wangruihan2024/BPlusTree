@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <random>
 #include <vector>
+#include <iostream>
 
 #include "buffer/buffer_pool_manager.h"
 #include "gtest/gtest.h"
@@ -26,6 +27,7 @@ namespace bustub {
 using bustub::DiskManagerUnlimitedMemory;
 
 TEST(BPlusTreeTests, InsertTest1) {
+  std::cout << "this is test 1" << std::endl;
   // create KeyComparator and index schema
   auto key_schema = ParseCreateStatement("a bigint");
   GenericComparator<8> comparator(key_schema.get());
