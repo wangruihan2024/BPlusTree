@@ -2,6 +2,8 @@
 
 #include <sstream>
 #include <string>
+#include <queue>
+#include <vector>
 
 #include "buffer/lru_k_replacer.h"
 #include "common/config.h"
@@ -31,6 +33,7 @@ BPLUSTREE_TYPE::BPlusTree(std::string name, page_id_t header_page_id,
       internal_max_size_(internal_max_size),
       header_page_id_(header_page_id)
 {
+  {
   WritePageGuard guard = bpm_ -> FetchPageWrite(header_page_id_);
   // In the original bpt, I fetch the header page
   // thus there's at least one page now
@@ -38,6 +41,8 @@ BPLUSTREE_TYPE::BPlusTree(std::string name, page_id_t header_page_id,
   // reinterprete the data of the page into "HeaderPage"
   root_header_page -> root_page_id_ = INVALID_PAGE_ID;
   // set the root_id to INVALID
+  }
+  // bpm_->UnpinPage(header_page_id_, true);
 }
 
 /*
@@ -69,9 +74,25 @@ auto BPLUSTREE_TYPE::GetValue(const KeyType& key,
      ->  bool
 {
   //Your code here
+  ReadPageGuard header_guard = bpm_->FetchPageRead(header_page_id_);
+  auto root_header_page = header_guard.As<BPlusTreeHeaderPage>();
+  bool is_empty = root_header_page->root_page_id_ == INVALID_PAGE_ID;
+  if(is_empty)
+    return false;
+  header_guard = bpm_->FetchPageRead(root_header_page->root_page_id_);
+  const InternalPage *tmp = header_guard.As<InternalPage>();
+  while(!tmp->IsLeafPage()) {
+    int new_tmp = BinaryFind(tmp, key);
+    header_guard = std::move(bpm_->FetchPageRead(tmp->ValueAt(new_tmp)));
+    tmp = header_guard.As<InternalPage>();
+  }
+  const LeafPage *leaf_page = header_guard.As<LeafPage>();
+  int leaf_pos = BinaryFind(leaf_page, key);
+  if(leaf_pos == -1 || comparator_(key, leaf_page->KeyAt(leaf_pos)) != 0)
+    return false;
+  result->push_back(leaf_page->ValueAt(leaf_pos));
   return true;
 }
-
 /*****************************************************************************
  * INSERTION
  *****************************************************************************/
@@ -88,7 +109,25 @@ INDEX_TEMPLATE_ARGUMENTS
 auto BPLUSTREE_TYPE::Insert(const KeyType& key, const ValueType& value,
                             Transaction* txn)  ->  bool
 {
+  // std::cout << ">>> Insert started" << std::endl;
   //Your code here
+  WritePageGuard header_guard = bpm_->FetchPageWrite(header_page_id_);
+  //  std::cout << "insert 1" << std::endl;
+  auto root_header_page = header_guard.AsMut<BPlusTreeHeaderPage>();
+  //  std::cout << "insert 2" << std::endl;
+  // empty
+  bool is_empty = root_header_page->root_page_id_ == INVALID_PAGE_ID;
+  //  std::cout << "insert 3" << std::endl;
+  if(is_empty) {
+    WritePageGuard new_root = (bpm_->NewPageGuarded(&(root_header_page->root_page_id_))).UpgradeWrite();
+    LeafPage *root = new_root.AsMut<LeafPage>();
+    root->Init(leaf_max_size_);
+    root->SetKeyAt(0, key);
+    root->SetSize(1);
+    root->SetValueAt(0, value);
+    //  std::cout << "insert 4" << std::endl;
+    return true;
+  }
   return true;
 }
 
@@ -257,9 +296,13 @@ auto BPLUSTREE_TYPE::End()  ->  INDEXITERATOR_TYPE
 INDEX_TEMPLATE_ARGUMENTS
 auto BPLUSTREE_TYPE::GetRootPageId()  ->  page_id_t
 {
+  // std::cout << "stuck pos 0" << std::endl;
   ReadPageGuard guard = bpm_ -> FetchPageRead(header_page_id_);
+  // std::cout << "stuck pos 1" << std::endl;
   auto root_header_page = guard.template As<BPlusTreeHeaderPage>();
+  // std::cout << "stuck pos 2" << std::endl;
   page_id_t root_page_id = root_header_page -> root_page_id_;
+  // std::cout << "stuck pos 3" << std::endl;
   return root_page_id;
 }
 

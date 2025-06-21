@@ -49,21 +49,26 @@ TEST(BPlusTreeTests, InsertTest1) {
   int64_t value = key & 0xFFFFFFFF;
   rid.Set(static_cast<int32_t>(key), value);
   index_key.SetFromInteger(key);
+  //  std::cout << "before insertion" << std::endl;
   tree.Insert(index_key, rid, transaction);
-
+    std::cout << "after insertion" << std::endl;
   auto root_page_id = tree.GetRootPageId();
+  //  std::cout << "stuck pos -1" << std::endl;
   auto root_page = reinterpret_cast<BPlusTreePage *>(bpm->FetchPage(root_page_id)->GetData());
+  // std::cout << "stuck pos 0" << std::endl;
   ASSERT_NE(root_page, nullptr);
   ASSERT_TRUE(root_page->IsLeafPage());
-
+  // std::cout << "stuck pos 1" << std::endl;
   auto root_as_leaf = reinterpret_cast<BPlusTreeLeafPage<GenericKey<8>, RID, GenericComparator<8>> *>(root_page);
   ASSERT_EQ(root_as_leaf->GetSize(), 1);
   ASSERT_EQ(comparator(root_as_leaf->KeyAt(0), index_key), 0);
-
+  // std::cout << "stuck pos 2" << std::endl;
   bpm->UnpinPage(root_page_id, false);
   bpm->UnpinPage(HEADER_PAGE_ID, true);
+  // std::cout << "stuck pos 3" << std::endl;
   delete transaction;
   delete bpm;
+  // std::cout << "stuck pos 4" << std::endl;
 }
 
 TEST(BPlusTreeTests, InsertTest2) {
