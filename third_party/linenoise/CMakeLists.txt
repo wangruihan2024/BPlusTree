@@ -1,3 +1,3 @@
-cmake_minimum_required(VERSION 4.0)
+cmake_minimum_required(VERSION 3.27)
 
 add_library(bustub_linenoise STATIC linenoise.c)
