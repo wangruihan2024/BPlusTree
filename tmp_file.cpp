@@ -179,8 +179,7 @@ auto BPLUSTREE_TYPE::Insert(const KeyType& key, const ValueType& value,
   // with split
   // page_id_t insert_idx = childs.top();  
     // split leaf
-  KeyType split_key;
-  page_id_t left, right;
+  page_id_t leaf_id = guards.back().PageId();
   page_id_t left_new_id, right_new_id;
   WritePageGuard left_new_guard = bpm_->NewPageGuarded(&left_new_id).UpgradeWrite();
   WritePageGuard right_new_guard = bpm_->NewPageGuarded(&right_new_id).UpgradeWrite();
