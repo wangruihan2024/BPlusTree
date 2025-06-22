@@ -48,14 +48,11 @@ BPLUSTREE_TYPE::BPlusTree(std::string name, page_id_t header_page_id,
 
 INDEX_TEMPLATE_ARGUMENTS
 void BPLUSTREE_TYPE::PageCopy(WritePageGuard &be_copied, WritePageGuard &copied) {
-  memcpy(be_copied.AsMut<void>(), copied.AsMut<void>(), bustub::BUSTUB_PAGE_SIZE);
-  /*
   char *be_copied_ptr = reinterpret_cast<char *>(be_copied.AsMut<void>());
   char *copied_ptr = reinterpret_cast<char *>(copied.AsMut<void>());
   for (size_t i = 0; i < BUSTUB_PAGE_SIZE; ++i) {
     be_copied_ptr[i] =copied_ptr[i];
   }
-  */
 }
 
 
@@ -118,14 +115,11 @@ auto BPLUSTREE_TYPE::GetValue(const KeyType& key,
  * keys return false, otherwise return true.
  */
 
-int insert_cnt = 0;
+
 INDEX_TEMPLATE_ARGUMENTS
 auto BPLUSTREE_TYPE::Insert(const KeyType& key, const ValueType& value,
                             Transaction* txn)  ->  bool
 {
-  insert_cnt++;
-  std::cout << "this is the " << insert_cnt << " th insert" << std::endl; 
-  std::cout << DrawBPlusTree() << std::endl;
   // std::cout << ">>> Insert started" << std::endl;
   //Your code here
   WritePageGuard header_guard = bpm_->FetchPageWrite(header_page_id_);
@@ -139,7 +133,6 @@ auto BPLUSTREE_TYPE::Insert(const KeyType& key, const ValueType& value,
     root->IncreaseSize(1);
     root->SetKeyAt(0, key);
     root->SetValueAt(0, value);
-
     return true;
   }
   // 不能用queue不支持随机访问
@@ -175,7 +168,6 @@ auto BPLUSTREE_TYPE::Insert(const KeyType& key, const ValueType& value,
   if(leaf_pos != -1 && comparator_(key, leaf_page->KeyAt(leaf_pos)) == 0)
     return false;
   // with no split
-  std::cout << "the leaf page has a size of " << leaf_page->GetSize() << std::endl;
   if(leaf_page->GetSize() < leaf_page->GetMaxSize()) {
     if(!release_root) {
       header_guard.Drop();
@@ -197,7 +189,6 @@ auto BPLUSTREE_TYPE::Insert(const KeyType& key, const ValueType& value,
   // with split
   // page_id_t insert_idx = childs.top();  
     // split leaf
-  std::cout << "the case do need to split leaf" << std::endl;
   KeyType split_key;
   page_id_t left, right;
   {
@@ -213,7 +204,6 @@ auto BPLUSTREE_TYPE::Insert(const KeyType& key, const ValueType& value,
     for(int i = 0; i < left_new_page->GetMinSize(); i++) {
       left_new_page->IncreaseSize(1);
       if(i == leaf_pos + 1) {
-        std::cout << "insert at the new-left page with position:" << i << std::endl;
         left_new_page->SetKeyAt(i, key);
         left_new_page->SetValueAt(i, value);
         if_insert = true;
@@ -227,12 +217,9 @@ auto BPLUSTREE_TYPE::Insert(const KeyType& key, const ValueType& value,
         }
       }
     }
-    std::cout << "the target leaf pos is" << leaf_pos << std::endl;
-    std::cout << "the size of the new left page is " << left_new_page->GetSize() << std::endl;
     for(int i = 0; i + left_new_page->GetSize() < leaf_page->GetSize() + 1; i++) {
       right_new_page->IncreaseSize(1);
       if((i + left_new_page->GetSize()) == (leaf_pos + 1)) {
-        std::cout << "insert at the new-right page with position:" << i << std::endl;
         right_new_page->SetKeyAt(i, key);
         right_new_page->SetValueAt(i, value);
         if_insert = true;
@@ -255,8 +242,7 @@ auto BPLUSTREE_TYPE::Insert(const KeyType& key, const ValueType& value,
   }
     // simple split to the last necessary floor
   for(int i = guards.size() - 2; i >= release_root; i--) {
-    std::cout << "the case do need to split the internal" << std::endl;
-    WritePageGuard &tmp_guard = guards[i]; // node_guard, target_childs[i + 1], split_key, r_chi
+    WritePageGuard &tmp_guard = guards[i]; // childs[i]m split_key, right
     {
       page_id_t tmp_id = tmp_guard.PageId();
       InternalPage *tmp_page = tmp_guard.AsMut<InternalPage>();
@@ -265,15 +251,11 @@ auto BPLUSTREE_TYPE::Insert(const KeyType& key, const ValueType& value,
       WritePageGuard tmp_right_guard = bpm_->NewPageGuarded(&tmp_right_id).UpgradeWrite();
       InternalPage *tmp_left_page = tmp_left_guard.AsMut<InternalPage>();
       InternalPage *tmp_right_page = tmp_right_guard.AsMut<InternalPage>();
-      tmp_left_page->Init(internal_max_size_);
-      tmp_right_page->Init(internal_max_size_);
-      tmp_left_page->SetSize(0);
-      tmp_right_page->SetSize(0);
-      // 这里需要把size初始化为0， init是初始化为1！！！
+      int halfsize = (internal_max_size_ + 1) / 2;
       bool if_inserted = false;
-      for(int j = 0; j < tmp_left_page->GetMinSize(); j++) {
+      for(int j = 0; j < halfsize; j++) {
         tmp_left_page->IncreaseSize(1);
-        if(j == childs[i + 1] + 1) {
+        if(j == childs[i] + 1) {
           tmp_left_page->SetKeyAt(j, split_key);
           tmp_left_page->SetValueAt(j, right);
           if_inserted = true;
@@ -288,19 +270,19 @@ auto BPLUSTREE_TYPE::Insert(const KeyType& key, const ValueType& value,
         }
       }
       // size_t left_size = tmp_left_page->GetSize();
-      for(int j = 0; j + tmp_left_page->GetSize() < tmp_page->GetSize() + 1; j++) {
+      for(int j = 0; j + halfsize < tmp_page->GetSize() + 1; j++) {
         tmp_right_page->IncreaseSize(1);
-        if(j + tmp_left_page->GetSize() == childs[i + 1] + 1) {
+        if(j + halfsize == childs[i] + 1) {
           tmp_right_page->SetKeyAt(j, split_key);
           tmp_right_page->SetValueAt(j, right);
           if_inserted = true;
         } else {
           if(if_inserted) {
-            tmp_right_page->SetKeyAt(j, tmp_page->KeyAt(j + tmp_left_page->GetSize() - 1));
-            tmp_right_page->SetValueAt(j, tmp_page->ValueAt(j + tmp_left_page->GetSize() - 1));
+            tmp_right_page->SetKeyAt(j, tmp_page->KeyAt(j + halfsize- 1));
+            tmp_right_page->SetValueAt(j, tmp_page->ValueAt(j + halfsize - 1));
           } else {
-            tmp_right_page->SetKeyAt(j, tmp_page->KeyAt(j + tmp_left_page->GetSize()));
-            tmp_right_page->SetValueAt(j, tmp_page->ValueAt(j + tmp_left_page->GetSize()));
+            tmp_right_page->SetKeyAt(j, tmp_page->KeyAt(j + halfsize));
+            tmp_right_page->SetValueAt(j, tmp_page->ValueAt(j + halfsize));
           }
         }
       }
@@ -313,8 +295,6 @@ auto BPLUSTREE_TYPE::Insert(const KeyType& key, const ValueType& value,
     // split without root
   if(release_root) {
     InternalPage *tmp = guards.front().AsMut<InternalPage>();
-    // std::cout << "tmp has a last size of " << tmp->GetSize() << std::endl;
-    tmp->IncreaseSize(1);
     for(int i = tmp->GetSize() - 1; i > childs[1] + 1; i--) {
       tmp->SetKeyAt(i, tmp->KeyAt(i - 1));
       tmp->SetValueAt(i, tmp->ValueAt(i - 1));
@@ -323,7 +303,6 @@ auto BPLUSTREE_TYPE::Insert(const KeyType& key, const ValueType& value,
     tmp->SetValueAt(childs[1] + 1, right);
     return true;
   } else {
-    std::cout << "the root need to split" << std::endl;
     // 不能不写else 前一步改right
     // split with root
     page_id_t new_root_id;
