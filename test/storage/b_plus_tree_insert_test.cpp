@@ -220,6 +220,9 @@ TEST(BPlusTreeTests, InsertTest4)
     int64_t value = key & 0xFFFFFFFF;
     rid.Set(static_cast<int32_t>(key >> 32), value);
     index_key.SetFromInteger(key);
+    // std::cout << "the value is" << value << std::endl;
+    // std::cout << "the key is" << key << std::endl;
+    // std::cout << "the index_key is" << index_key << std::endl;
     tree.Insert(index_key, rid, transaction);
   }
 
