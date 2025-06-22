@@ -46,6 +46,16 @@ BPLUSTREE_TYPE::BPlusTree(std::string name, page_id_t header_page_id,
   // bpm_->UnpinPage(header_page_id_, true);
 }
 
+INDEX_TEMPLATE_ARGUMENTS
+void BPLUSTREE_TYPE::PageCopy(WritePageGuard &be_copied, WritePageGuard &copied) {
+  char *be_copied_ptr = reinterpret_cast<char *>(be_copied.AsMut<void>());
+  char *copied_ptr = reinterpret_cast<char *>(copied.AsMut<void>());
+  for (size_t i = 0; i < BUSTUB_PAGE_SIZE; ++i) {
+    be_copied_ptr[i] =copied_ptr[i];
+  }
+}
+
+
 /*
  * Helper function to decide whether current b+tree is empty
  */
@@ -181,100 +191,107 @@ auto BPLUSTREE_TYPE::Insert(const KeyType& key, const ValueType& value,
     // split leaf
   KeyType split_key;
   page_id_t left, right;
-  page_id_t left_new_id, right_new_id;
-  WritePageGuard left_new_guard = bpm_->NewPageGuarded(&left_new_id).UpgradeWrite();
-  WritePageGuard right_new_guard = bpm_->NewPageGuarded(&right_new_id).UpgradeWrite();
-  LeafPage *left_new_page = left_new_guard.AsMut<LeafPage>();
-  LeafPage *right_new_page = right_new_guard.AsMut<LeafPage>();
-  left_new_page->Init(leaf_max_size_);
-  right_new_page->Init(leaf_max_size_);
-  int halfsize = (leaf_max_size_ + 1) / 2;
-  bool if_insert = false;
-  for(int i = 0; i < halfsize; i++) {
-    left_new_page->IncreaseSize(1);
-    if(i == leaf_pos + 1) {
-      left_new_page->SetKeyAt(i, key);
-      left_new_page->SetValueAt(i, value);
-      if_insert = true;
-    } else {
-      if(if_insert) {
-        left_new_page->SetKeyAt(i, leaf_page->KeyAt(i - 1));
-        left_new_page->SetValueAt(i, leaf_page->ValueAt(i - 1));
+  {
+    page_id_t leaf_id = leaf_target.PageId();
+    page_id_t left_new_id, right_new_id;
+    WritePageGuard left_new_guard = bpm_->NewPageGuarded(&left_new_id).UpgradeWrite();
+    WritePageGuard right_new_guard = bpm_->NewPageGuarded(&right_new_id).UpgradeWrite();
+    LeafPage *left_new_page = left_new_guard.AsMut<LeafPage>();
+    LeafPage *right_new_page = right_new_guard.AsMut<LeafPage>();
+    left_new_page->Init(leaf_max_size_);
+    right_new_page->Init(leaf_max_size_);
+    int halfsize = (leaf_max_size_ + 1) / 2;
+    bool if_insert = false;
+    for(int i = 0; i < halfsize; i++) {
+      left_new_page->IncreaseSize(1);
+      if(i == leaf_pos + 1) {
+        left_new_page->SetKeyAt(i, key);
+        left_new_page->SetValueAt(i, value);
+        if_insert = true;
       } else {
-        left_new_page->SetKeyAt(i, leaf_page->KeyAt(i));
-        left_new_page->SetValueAt(i, leaf_page->ValueAt(i));
+        if(if_insert) {
+          left_new_page->SetKeyAt(i, leaf_page->KeyAt(i - 1));
+          left_new_page->SetValueAt(i, leaf_page->ValueAt(i - 1));
+        } else {
+          left_new_page->SetKeyAt(i, leaf_page->KeyAt(i));
+          left_new_page->SetValueAt(i, leaf_page->ValueAt(i));
+        }
       }
     }
-  }
-  for(int i = 0; i + halfsize < leaf_page->GetSize() + 1; i++) {
-    right_new_page->IncreaseSize(1);
-    if((i + halfsize) == (leaf_pos + 1)) {
-      right_new_page->SetKeyAt(i, key);
-      right_new_page->SetValueAt(i, value);
-      if_insert = true;
-    }else {
-      if(if_insert) {
-        right_new_page->SetKeyAt(i, leaf_page->KeyAt(i + halfsize - 1));
-        right_new_page->SetValueAt(i, leaf_page->ValueAt(i + halfsize - 1));
+    for(int i = 0; i + halfsize < leaf_page->GetSize() + 1; i++) {
+      right_new_page->IncreaseSize(1);
+      if((i + halfsize) == (leaf_pos + 1)) {
+        right_new_page->SetKeyAt(i, key);
+        right_new_page->SetValueAt(i, value);
+        if_insert = true;
       }else {
-        right_new_page->SetKeyAt(i, leaf_page->KeyAt(i + halfsize));
-        right_new_page->SetValueAt(i, leaf_page->ValueAt(i + halfsize));
+        if(if_insert) {
+          right_new_page->SetKeyAt(i, leaf_page->KeyAt(i + halfsize - 1));
+          right_new_page->SetValueAt(i, leaf_page->ValueAt(i + halfsize - 1));
+        }else {
+          right_new_page->SetKeyAt(i, leaf_page->KeyAt(i + halfsize));
+          right_new_page->SetValueAt(i, leaf_page->ValueAt(i + halfsize));
+        }
       }
     }
+    right_new_page->SetNextPageId(leaf_page->GetNextPageId());
+    leaf_page->SetNextPageId(right_new_id);
+    PageCopy(leaf_target, left_new_guard); 
+    split_key = right_new_page->KeyAt(0);
+    left = leaf_id;
+    right = right_new_id;
   }
-  right_new_page->SetNextPageId(leaf_page->GetNextPageId());
-  leaf_page->SetSize(left_new_page->GetSize());
-  for (int i = 0; i < left_new_page->GetSize(); i++) {
-    leaf_page->SetKeyAt(i, left_new_page->KeyAt(i));
-    leaf_page->SetValueAt(i, left_new_page->ValueAt(i));
-  }
-  leaf_page->SetNextPageId(right_new_id);
-  left_new_guard.Drop();
-  right_new_guard.Drop();
-  KeyType split_key = right_new_page->KeyAt(0);
-  page_id_t left = leaf_id;
-  page_id_t right = right_new_id;
     // simple split to the last necessary floor
   for(int i = guards.size() - 2; i >= release_root; i--) {
-    WritePageGuard &tmp = guards[i];
-    InternalPage *tmp_page = tmp.AsMut<InternalPage>();
-    int pos = childs[i + 1];  // 子节点是它的第 pos 个孩子
-    if(tmp_page->GetSize() < tmp_page->GetMaxSize()) {
-      tmp_page->IncreaseSize(1);
-      for (int j = tmp_page->GetSize() - 1; j > pos + 1; j--) {
-        tmp_page->SetKeyAt(j, tmp_page->KeyAt(j - 1));
-        tmp_page->SetValueAt(j, tmp_page->ValueAt(j - 1));
+    WritePageGuard &tmp_guard = guards[i]; // childs[i]m split_key, right
+    {
+      page_id_t tmp_id = tmp_guard.PageId();
+      InternalPage *tmp_page = tmp_guard.AsMut<InternalPage>();
+      page_id_t tmp_left_id, tmp_right_id;
+      WritePageGuard tmp_left_guard = bpm_->NewPageGuarded(&tmp_left_id).UpgradeWrite();
+      WritePageGuard tmp_right_guard = bpm_->NewPageGuarded(&tmp_right_id).UpgradeWrite();
+      InternalPage *tmp_left_page = tmp_left_guard.AsMut<InternalPage>();
+      InternalPage *tmp_right_page = tmp_right_guard.AsMut<InternalPage>();
+      int halfsize = (internal_max_size_ + 1) / 2;
+      bool if_inserted = false;
+      for(int j = 0; j < halfsize; j++) {
+        tmp_left_page->IncreaseSize(1);
+        if(j == childs[i] + 1) {
+          tmp_left_page->SetKeyAt(j, split_key);
+          tmp_left_page->SetValueAt(j, right);
+          if_inserted = true;
+        } else {
+          if(if_inserted) {
+            tmp_left_page->SetKeyAt(j, tmp_page->KeyAt(j - 1));
+            tmp_left_page->SetValueAt(j, tmp_page->ValueAt(j - 1));
+          } else {
+            tmp_left_page->SetKeyAt(j, tmp_page->KeyAt(j));
+            tmp_left_page->SetValueAt(j, tmp_page->ValueAt(j));
+          }
+        }
       }
-      tmp_page->SetKeyAt(pos + 1, split_key);
-      tmp_page->SetValueAt(pos + 1, right);
-      return true;  // 插入成功，停止向上传递
+      // size_t left_size = tmp_left_page->GetSize();
+      for(int j = 0; j + halfsize < tmp_page->GetSize() + 1; j++) {
+        tmp_right_page->IncreaseSize(1);
+        if(j + halfsize == childs[i] + 1) {
+          tmp_right_page->SetKeyAt(j, split_key);
+          tmp_right_page->SetValueAt(j, right);
+          if_inserted = true;
+        } else {
+          if(if_inserted) {
+            tmp_right_page->SetKeyAt(j, tmp_page->KeyAt(j + halfsize- 1));
+            tmp_right_page->SetValueAt(j, tmp_page->ValueAt(j + halfsize - 1));
+          } else {
+            tmp_right_page->SetKeyAt(j, tmp_page->KeyAt(j + halfsize));
+            tmp_right_page->SetValueAt(j, tmp_page->ValueAt(j + halfsize));
+          }
+        }
+      }
+      PageCopy(tmp_guard, tmp_left_guard);
+      split_key = tmp_right_page->KeyAt(0);
+      left = tmp_id;
+      right = tmp_right_id;
     }
-    // 否则，当前 InternalPage 也要 split
-    page_id_t new_internal_id;
-    WritePageGuard new_internal_guard = bpm_->NewPageGuarded(&new_internal_id).UpgradeWrite();
-    InternalPage *new_internal = new_internal_guard.AsMut<InternalPage>();
-    new_internal->Init(internal_max_size_);
-    // 临时数组存 key/value 对，便于插入并重分配
-    std::vector<std::pair<KeyType, page_id_t>> temp;
-    for (int j = 0; j < tmp_page->GetSize(); j++) {
-      temp.emplace_back(tmp_page->KeyAt(j), tmp_page->ValueAt(j));
-    }
-    temp.insert(temp.begin() + pos + 1, {split_key, right});
-    int half = temp.size() / 2;
-    tmp_page->SetSize(0);
-    for (int j = 0; j < half; j++) {
-      tmp_page->SetKeyAt(j, temp[j].first);
-      tmp_page->SetValueAt(j, temp[j].second);
-      tmp_page->IncreaseSize(1);
-    }
-    split_key = temp[half].first;
-    left = guards[i].PageId();
-    right = new_internal_id;
-    for (size_t j = half + 1; j < temp.size(); j++) {
-      new_internal->SetKeyAt(j - (half + 1), temp[j].first);
-      new_internal->SetValueAt(j - (half + 1), temp[j].second);
-      new_internal->IncreaseSize(1);
-    } 
   }
     // split without root
   if(release_root) {
