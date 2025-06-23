@@ -363,15 +363,15 @@ void BPLUSTREE_TYPE::Remove(const KeyType& key, Transaction* txn)
   //Your code here
   // empty
   WritePageGuard header_guard = bpm_->FetchPageWrite(header_page_id_);
-  auto root_header_page = header_guard.template As<BPlusTreeHeaderPage> ();
-  bool is_empty = (root_header_page->root_page_id_ == INVALID_PAGE_ID)
+  auto root_header_page = header_guard.template AsMut<BPlusTreeHeaderPage> ();
+  bool is_empty = (root_header_page->root_page_id_ == INVALID_PAGE_ID);
   if(is_empty)
     return;
   // find 
   std::deque<WritePageGuard> guards;
   std::deque<int> childs;
-  chidls.push_back(-1);
-  guards.push_back(header_guard);
+  childs.push_back(-1);
+  guards.push_back(std::move(bpm_->FetchPageWrite(root_header_page->root_page_id_)));
   const BPlusTreePage* root = header_guard.As<BPlusTreePage>();
   bool release_root = root->GetMinSize() < root->GetSize();
   if(root->GetMinSize() < root->GetSize())
@@ -379,7 +379,7 @@ void BPLUSTREE_TYPE::Remove(const KeyType& key, Transaction* txn)
   InternalPage *tmp = guards.back().AsMut<InternalPage>();
   while(!tmp->IsLeafPage()) {
     int new_tmp = BinaryFind(tmp, key);
-    guards.push_back(bpm_->FetchPageWrite(tmp->ValueAt(new_tmp)));
+    guards.push_back(std::move(bpm_->FetchPageWrite(tmp->ValueAt(new_tmp))));
     childs.push_back(new_tmp);
     tmp = guards.back().AsMut<InternalPage>();
     if(!tmp->IsLeafPage() && (tmp->GetSize() > tmp->GetMinSize())) {
@@ -396,9 +396,9 @@ void BPLUSTREE_TYPE::Remove(const KeyType& key, Transaction* txn)
   WritePageGuard& target_leaf = guards.back();
   LeafPage *leaf_page = target_leaf.AsMut<LeafPage>();
   int leaf_pos = BinaryFind(leaf_page, key);
-  if(leaf_page != -1 || comparator_(key, leaf_page->ValueAt(leaf_pos)) == 0)
+  if(leaf_pos == -1 || comparator_(key, leaf_page->KeyAt(leaf_pos)) != 0)
     return;
-  for(int i = guards.size() - 2; i > leaf_pos; i--) {
+  for (int i = leaf_pos; i < leaf_page->GetSize() - 1; i++) {
     leaf_page->SetKeyAt(i, leaf_page->KeyAt(i + 1));
     leaf_page->SetValueAt(i, leaf_page->ValueAt(i + 1));
   }
@@ -410,10 +410,10 @@ void BPLUSTREE_TYPE::Remove(const KeyType& key, Transaction* txn)
       release_root = true;
     }
     while(guards.size() > 1) {
-      guards.pop_fornt();
+      guards.pop_front();
     }
     if(root->IsLeafPage() && leaf_page->GetSize() == 0)
-      header->root_page_id_ = INVALID_PAGE_ID;
+      root_header_page->root_page_id_ = INVALID_PAGE_ID;
     return;
   }
   //with split
@@ -454,7 +454,7 @@ void BPLUSTREE_TYPE::Remove(const KeyType& key, Transaction* txn)
         brother_pos = tmp_pos - 1;
       else 
         brother_pos = tmp_pos + 1; // borrow from brother on the right
-      WritePageGuard &brother_guard = bpm_->FetchPageWrite(parent->ValueAt(brother_pos));
+      WritePageGuard brother_guard = bpm_->FetchPageWrite(parent->ValueAt(brother_pos));
       InternalPage *brother_page = brother_guard.AsMut<InternalPage>();
       if(brother_page->GetSize() > brother_page->GetMinSize())  {
         if(!release_root) {
@@ -462,15 +462,15 @@ void BPLUSTREE_TYPE::Remove(const KeyType& key, Transaction* txn)
           release_root = true;
         }
         if(brother_pos == tmp_pos - 1) // borrow from left brother
-          borrow(brother_page, tmp_guard, parent, true, brother_pos);
+          borrow(brother_page, tmp_page, parent, true, brother_pos);
         else // borrow from right brother
-          borrow(brother_page, tmp_guard, parent, false, tmp_pos);
+          borrow(brother_page, tmp_page, parent, false, tmp_pos);
         break;
       } else {
         if(brother_pos == tmp_pos - 1) // merge with left brother
-          new_id = Internalmerge(brother_page, tmp_page, parent, brother_pos);
+          new_id = Internalmerge(brother_guard, tmp_guard, parent, brother_pos);
         else // merge with right brother
-          new_id = Internalmerge(tmp_page, brother_guard, parent, tmp_pos);
+          new_id = Internalmerge(tmp_guard, brother_guard, parent, tmp_pos);
       }    
     }
   }
@@ -479,12 +479,12 @@ void BPLUSTREE_TYPE::Remove(const KeyType& key, Transaction* txn)
 }
 
 INDEX_TEMPLATE_ARGUMENTS
-void BPLUSTREE_TYPE::borrow(LeafPage *lender, LeafPage *receiver, InternalPage *parent, bool &leftmost, int &pos) {
+void BPLUSTREE_TYPE::borrow(LeafPage *lender, LeafPage *receiver, InternalPage *parent, bool leftmost, int &pos) {
   if (leftmost) { // borrow from brother on the left
     receiver->IncreaseSize(1);
     for(int i = 0; i < receiver->GetSize() - 1; i++) {
       receiver->SetKeyAt(i + 1, receiver->KeyAt(i));
-      receiver->SetValueAt(i + 1, receiver->KeyAt(i));
+      receiver->SetValueAt(i + 1, receiver->ValueAt(i));
     }
     receiver->SetKeyAt(0, lender->KeyAt(lender->GetSize() - 1));
     receiver->SetValueAt(0, lender->ValueAt(lender->GetSize() - 1));
@@ -507,10 +507,10 @@ INDEX_TEMPLATE_ARGUMENTS
 page_id_t BPLUSTREE_TYPE::merge(WritePageGuard &left, WritePageGuard& right, InternalPage *parent, int &pos) {
   page_id_t left_id = left.PageId();
   page_id_t new_id;
-  WritePageGuard *new_guard = bpm_->NewPageGuarded(&new_id).UpgradeWrite();
+  WritePageGuard new_guard = bpm_->NewPageGuarded(&new_id).UpgradeWrite();
   LeafPage *left_page = left.AsMut<LeafPage>();
   LeafPage *right_page = right.AsMut<LeafPage>();
-  LeafPage *new_page = new_guard->AsMut<LeafPage>();
+  LeafPage *new_page = new_guard.AsMut<LeafPage>();
   new_page->Init(leaf_max_size_);
   new_page->SetSize(left_page->GetSize() + right_page->GetSize());
   for(int i = 0; i < left_page->GetSize(); i++) {
@@ -534,12 +534,12 @@ page_id_t BPLUSTREE_TYPE::merge(WritePageGuard &left, WritePageGuard& right, Int
 }
 
 INDEX_TEMPLATE_ARGUMENTS
-void BPLUSTREE_TYPE::borrow(InternalPage *lender, InternalPage *receiver, InternalPage *parent, bool &leftmost, int &pos) {
+void BPLUSTREE_TYPE::borrow(InternalPage *lender, InternalPage *receiver, InternalPage *parent, bool leftmost, int &pos) {
   if (leftmost) { // borrow from brother on the left
     receiver->IncreaseSize(1);
     for(int i = 0; i < receiver->GetSize() - 1; i++) {
       receiver->SetKeyAt(i + 1, receiver->KeyAt(i));
-      receiver->SetValueAt(i + 1, receiver->KeyAt(i));
+      receiver->SetValueAt(i + 1, receiver->ValueAt(i));
     }
     receiver->SetKeyAt(0, lender->KeyAt(lender->GetSize() - 1));
     receiver->SetValueAt(0, lender->ValueAt(lender->GetSize() - 1));
@@ -562,10 +562,10 @@ INDEX_TEMPLATE_ARGUMENTS
 page_id_t BPLUSTREE_TYPE::Internalmerge(WritePageGuard &left, WritePageGuard& right, InternalPage *parent, int &pos) {
   page_id_t left_id = left.PageId();
   page_id_t new_id;
-  WritePageGuard *new_guard = bpm_->NewPageGuarded(&new_id).UpgradeWrite();
+  WritePageGuard new_guard = bpm_->NewPageGuarded(&new_id).UpgradeWrite();
   InternalPage *left_page = left.AsMut<InternalPage>();
   InternalPage *right_page = right.AsMut<InternalPage>();
-  InternalPage *new_page = new_guard->AsMut<InternalPage>();
+  InternalPage *new_page = new_guard.AsMut<InternalPage>();
   new_page->Init(internal_max_size_);
   new_page->SetSize(left_page->GetSize() + right_page->GetSize());
   for(int i = 0; i < left_page->GetSize(); i++) {

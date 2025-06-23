@@ -78,9 +78,9 @@ class BPlusTree {
 
   // Remove a key and its value from this B+ tree.
   void Remove(const KeyType &key, Transaction *txn);
-  void borrow(LeafPage *lender, LeafPage *receiver, InternalPage *parent, bool &leftmost, int &pos);
+  void borrow(LeafPage *lender, LeafPage *receiver, InternalPage *parent, bool leftmost, int &pos);
   page_id_t merge(WritePageGuard &left, WritePageGuard &right, InternalPage *parent, int &pos);
-  void borrow(InternalPage *lender, InternalPage *receiver, InternalPage *parent, bool &leftmost, int &pos);
+  void borrow(InternalPage *lender, InternalPage *receiver, InternalPage *parent, bool leftmost, int &pos);
   page_id_t Internalmerge(WritePageGuard &left, WritePageGuard &right, InternalPage *parent, int &pos);
 
   // Return the value associated with a given key
