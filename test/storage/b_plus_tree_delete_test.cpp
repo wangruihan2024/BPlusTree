@@ -271,10 +271,12 @@ TEST(BPlusTreeTests, DeleteTest4)
 
   index_key.SetFromInteger(10);
   tree.Remove(index_key, transaction);
+  std::cout << "remove 10" << std::endl;
 
   std::vector<int64_t> remove_keys = {2, 4};
   for (auto key : remove_keys)
   {
+    std::cout << "remove 2 & 4" << std::endl;
     index_key.SetFromInteger(key);
     tree.Remove(index_key, transaction);
   }

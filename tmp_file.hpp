@@ -66,19 +66,6 @@ class BPlusTree {
 
  public:
   static void PageCopy(WritePageGuard &be_copied, WritePageGuard &copied);
-  void InsertAtLeaf(LeafPage *node, int x, const KeyType &key, const ValueType &value);
-  void InsertAtInternal(InternalPage *node, int x, const KeyType &key, page_id_t value);
-  std::tuple<KeyType, page_id_t, page_id_t> SplitAtLeaf(WritePageGuard& node_guard, int x, const KeyType& key, const ValueType& value);
-  std::tuple<KeyType, page_id_t, page_id_t> SplitAtInternal(WritePageGuard& node_guard, int x, const KeyType& key, page_id_t child);
-  page_id_t PromoteRoot(const KeyType& key, page_id_t l_child, page_id_t r_child);
-
-  void EraseAtLeaf(LeafPage *node, int x);
-  void EraseAtInternal(InternalPage *node, int x);
-  void BorrowAtLeaf(LeafPage* l_node, LeafPage* r_node, int direction, InternalPage *parent,  int x);
-  void BorrowAtInternal(InternalPage* l_node, InternalPage* r_node, int direction, InternalPage *parent,  int x);
-  page_id_t MergeAtLeaf(WritePageGuard& l_node_guard, WritePageGuard& r_node_guard, InternalPage *parent, int x);
-  page_id_t MergeAtInternal(WritePageGuard& l_node_guard, WritePageGuard& r_node_guard, InternalPage *parent, int x);
-
   explicit BPlusTree(std::string name, page_id_t header_page_id, BufferPoolManager *buffer_pool_manager,
                      const KeyComparator &comparator, int leaf_max_size = LEAF_PAGE_SIZE,
                      int internal_max_size = INTERNAL_PAGE_SIZE);
@@ -91,6 +78,10 @@ class BPlusTree {
 
   // Remove a key and its value from this B+ tree.
   void Remove(const KeyType &key, Transaction *txn);
+  void borrow(LeafPage *lender, LeafPage *receiver, InternalPage *parent, bool leftmost, int &pos);
+  page_id_t merge(WritePageGuard &left, WritePageGuard &right, InternalPage *parent, int &pos);
+  void borrow(InternalPage *lender, InternalPage *receiver, InternalPage *parent, bool leftmost, int &pos);
+  page_id_t Internalmerge(WritePageGuard &left, WritePageGuard &right, InternalPage *parent, int &pos);
 
   // Return the value associated with a given key
   auto GetValue(const KeyType &key, std::vector<ValueType> *result, Transaction *txn = nullptr) -> bool;

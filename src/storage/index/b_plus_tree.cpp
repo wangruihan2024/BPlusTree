@@ -2,9 +2,6 @@
 
 #include <sstream>
 #include <string>
-#include <queue>
-#include <vector>
-#include <queue>
 
 #include "buffer/lru_k_replacer.h"
 #include "common/config.h"
@@ -54,7 +51,6 @@ void BPLUSTREE_TYPE::PageCopy(WritePageGuard &be_copied, WritePageGuard &copied)
     be_copied_ptr[i] =copied_ptr[i];
   }
 }
-
 
 /*
  * Helper function to decide whether current b+tree is empty
@@ -115,234 +111,205 @@ auto BPLUSTREE_TYPE::GetValue(const KeyType& key,
  * keys return false, otherwise return true.
  */
 
-int insert_cnt = 0;
 INDEX_TEMPLATE_ARGUMENTS
 auto BPLUSTREE_TYPE::Insert(const KeyType& key, const ValueType& value,
-                            Transaction* txn)  ->  bool
-{
-  insert_cnt++;
-  // std::cout << "this is the " << insert_cnt << " th insert" << std::endl; 
-  // std::cout << DrawBPlusTree() << std::endl;
-  // std::cout << ">>> Insert started" << std::endl;
-  //Your code here
+                            Transaction* txn) -> bool {
   WritePageGuard header_guard = bpm_->FetchPageWrite(header_page_id_);
-  BPlusTreeHeaderPage* root_header_page = header_guard.AsMut<BPlusTreeHeaderPage>();
-  // empty
-  bool is_empty = root_header_page->root_page_id_ == INVALID_PAGE_ID;
-  if(is_empty) {
-    WritePageGuard new_root = (bpm_->NewPageGuarded(&root_header_page->root_page_id_)).UpgradeWrite();
-    LeafPage *root = new_root.AsMut<LeafPage>();
+  auto *header = header_guard.AsMut<BPlusTreeHeaderPage>();
+  // 空树初始化
+  if (header->root_page_id_ == INVALID_PAGE_ID) {
+    page_id_t root_id;
+    WritePageGuard root_guard = bpm_->NewPageGuarded(&root_id).UpgradeWrite();
+    auto *root = root_guard.AsMut<LeafPage>();
     root->Init(leaf_max_size_);
-    root->IncreaseSize(1);
     root->SetKeyAt(0, key);
     root->SetValueAt(0, value);
-
+    root->IncreaseSize(1);
+    header->root_page_id_ = root_id;
     return true;
   }
-  // 不能用queue不支持随机访问
-  // find node
-  std::deque<WritePageGuard> guards; // guards[i] the lock on node on the ith level
-  std::deque<int> childs;            // guards[i] is the childs[i]th child of guards[i - 1]
-  childs.push_back(-1);
-  guards.push_back(bpm_->FetchPageWrite(root_header_page->root_page_id_));
-  const BPlusTreePage *root = guards.front().As<BPlusTreePage>();
-  bool release_root = root->GetSize() < root->GetMaxSize();
-  if(release_root)
+  std::deque<WritePageGuard> guards;
+  std::deque<int> path;
+  // 初始 root 节点
+  guards.push_back(bpm_->FetchPageWrite(header->root_page_id_));
+  path.push_back(-1);
+  const auto *root_page = guards.front().As<BPlusTreePage>();
+  bool root_not_full = root_page->GetSize() < root_page->GetMaxSize();
+  if (root_not_full) {
     header_guard.Drop();
-  InternalPage *tmp = guards.back().AsMut<InternalPage>();
-  while(!tmp->IsLeafPage()) {
-    int new_tmp = BinaryFind(tmp, key);
-    guards.push_back(bpm_->FetchPageWrite(tmp->ValueAt(new_tmp)));
-    childs.push_back(new_tmp);
-    tmp = guards.back().AsMut<InternalPage>();
-    if(!tmp->IsLeafPage() && tmp->GetMaxSize() > tmp->GetSize()) {
-      if(!release_root) {          // header haven't been released 
+  }
+  auto *node = guards.back().AsMut<InternalPage>();
+  // 路径向下，直到叶子节点
+  while (!node->IsLeafPage()) {
+    int child_idx = BinaryFind(node, key);
+    guards.push_back(bpm_->FetchPageWrite(node->ValueAt(child_idx)));
+    path.push_back(child_idx);
+    node = guards.back().AsMut<InternalPage>();
+    if (!node->IsLeafPage() && node->GetSize() < node->GetMaxSize()) {
+      if (!root_not_full) {
         header_guard.Drop();
-        release_root = true;
+        root_not_full = true;
       }
-      while(guards.size() > 1) {
+      while (guards.size() > 1) {
         guards.pop_front();
-        childs.pop_front();
+        path.pop_front();
       }
     }
   }
-  WritePageGuard& leaf_target = guards.back();
-  LeafPage* leaf_page = leaf_target.AsMut<LeafPage>();
-  int leaf_pos = BinaryFind(leaf_page, key);
-  if(leaf_pos != -1 && comparator_(key, leaf_page->KeyAt(leaf_pos)) == 0)
-    return false;
-  // with no split
-  // std::cout << "the leaf page has a size of " << leaf_page->GetSize() << std::endl;
-  if(leaf_page->GetSize() < leaf_page->GetMaxSize()) {
-    if(!release_root) {
+  auto &leaf_guard = guards.back();
+  auto *leaf = leaf_guard.AsMut<LeafPage>();
+  int pos = BinaryFind(leaf, key);
+  if (pos != -1 && comparator_(leaf->KeyAt(pos), key) == 0) {
+    return false;  // duplicate key
+  }
+  // 简单插入
+  if (leaf->GetSize() < leaf->GetMaxSize()) {
+    if (!root_not_full) {
       header_guard.Drop();
-      release_root = true;
     }
-    while(guards.size() > 1) {
+    while (guards.size() > 1) {
       guards.pop_front();
-      // childs.pop_front();
+      path.pop_front();
     }
-    leaf_page->IncreaseSize(1);
-    for(int i = leaf_page->GetSize() - 1; i > leaf_pos + 1; i--) {
-      leaf_page->SetKeyAt(i, leaf_page->KeyAt(i - 1));
-      leaf_page->SetValueAt(i, leaf_page->ValueAt(i - 1));
-    }
-    leaf_page->SetKeyAt(leaf_pos + 1, key);
-    leaf_page->SetValueAt(leaf_pos + 1, value);
+    InsertAtLeaf(leaf, pos, key, value);
     return true;
   }
-  // with split
-  // page_id_t insert_idx = childs.top();  
-    // split leaf
-  // std::cout << "the case do need to split leaf" << std::endl;
-  KeyType split_key;
-  page_id_t left, right;
-  {
-    page_id_t leaf_id = leaf_target.PageId();
-    page_id_t left_new_id, right_new_id;
-    WritePageGuard left_new_guard = bpm_->NewPageGuarded(&left_new_id).UpgradeWrite();
-    WritePageGuard right_new_guard = bpm_->NewPageGuarded(&right_new_id).UpgradeWrite();
-    LeafPage *left_new_page = left_new_guard.AsMut<LeafPage>();
-    LeafPage *right_new_page = right_new_guard.AsMut<LeafPage>();
-    left_new_page->Init(leaf_max_size_);
-    right_new_page->Init(leaf_max_size_);
-    bool if_insert = false;
-    for(int i = 0; i < left_new_page->GetMinSize(); i++) {
-      left_new_page->IncreaseSize(1);
-      if(i == leaf_pos + 1) {
-        // std::cout << "insert at the new-left page with position:" << i << std::endl;
-        left_new_page->SetKeyAt(i, key);
-        left_new_page->SetValueAt(i, value);
-        if_insert = true;
-      } else {
-        if(if_insert) {
-          left_new_page->SetKeyAt(i, leaf_page->KeyAt(i - 1));
-          left_new_page->SetValueAt(i, leaf_page->ValueAt(i - 1));
-        } else {
-          left_new_page->SetKeyAt(i, leaf_page->KeyAt(i));
-          left_new_page->SetValueAt(i, leaf_page->ValueAt(i));
-        }
-      }
-    }
-    // std::cout << "the target leaf pos is" << leaf_pos << std::endl;
-    // std::cout << "the size of the new left page is " << left_new_page->GetSize() << std::endl;
-    for(int i = 0; i + left_new_page->GetSize() < leaf_page->GetSize() + 1; i++) {
-      right_new_page->IncreaseSize(1);
-      if((i + left_new_page->GetSize()) == (leaf_pos + 1)) {
-        // std::cout << "insert at the new-right page with position:" << i << std::endl;
-        right_new_page->SetKeyAt(i, key);
-        right_new_page->SetValueAt(i, value);
-        if_insert = true;
-      }else {
-        if(if_insert) {
-          right_new_page->SetKeyAt(i, leaf_page->KeyAt(i + left_new_page->GetSize() - 1));
-          right_new_page->SetValueAt(i, leaf_page->ValueAt(i + left_new_page->GetSize() - 1));
-        }else {
-          right_new_page->SetKeyAt(i, leaf_page->KeyAt(i + left_new_page->GetSize()));
-          right_new_page->SetValueAt(i, leaf_page->ValueAt(i + left_new_page->GetSize()));
-        }
-      }
-    }
-    right_new_page->SetNextPageId(leaf_page->GetNextPageId());
-    leaf_page->SetNextPageId(right_new_id);
-    PageCopy(leaf_target, left_new_guard); 
-    split_key = right_new_page->KeyAt(0);
-    left = leaf_id;
-    right = right_new_id;
-    bpm_->FlushPage(left);
-    bpm_->FlushPage(right);
+  // 分裂叶子节点
+  KeyType mid_key;
+  page_id_t left_id, right_id;
+  std::tie(mid_key, left_id, right_id) = SplitAtLeaf(leaf_guard, pos, key, value);
+  // 向上递归插入
+  for (int i = static_cast<int>(guards.size()) - 2; i >= (root_not_full ? 1 : 0); i--) {
+    auto &node_guard = guards[i];
+    int child_idx = path[i + 1];
+    std::tie(mid_key, left_id, right_id) = SplitAtInternal(node_guard, child_idx, mid_key, right_id);
   }
-    // simple split to the last necessary floor
-  for(int i = guards.size() - 2; i >= release_root; i--) {
-    // std::cout << "the case do need to split the internal" << std::endl;
-    WritePageGuard &tmp_guard = guards[i]; // node_guard, target_childs[i + 1], split_key, r_chi
-    {
-      page_id_t tmp_id = tmp_guard.PageId();
-      InternalPage *tmp_page = tmp_guard.AsMut<InternalPage>();
-      page_id_t tmp_left_id, tmp_right_id;
-      WritePageGuard tmp_left_guard = bpm_->NewPageGuarded(&tmp_left_id).UpgradeWrite();
-      WritePageGuard tmp_right_guard = bpm_->NewPageGuarded(&tmp_right_id).UpgradeWrite();
-      InternalPage *tmp_left_page = tmp_left_guard.AsMut<InternalPage>();
-      InternalPage *tmp_right_page = tmp_right_guard.AsMut<InternalPage>();
-      tmp_left_page->Init(internal_max_size_);
-      tmp_right_page->Init(internal_max_size_);
-      tmp_left_page->SetSize(0);
-      tmp_right_page->SetSize(0);
-      // 这里需要把size初始化为0， init是初始化为1！！！
-      bool if_inserted = false;
-      for(int j = 0; j < tmp_left_page->GetMinSize(); j++) {
-        tmp_left_page->IncreaseSize(1);
-        if(j == childs[i + 1] + 1) {
-          tmp_left_page->SetKeyAt(j, split_key);
-          tmp_left_page->SetValueAt(j, right);
-          if_inserted = true;
-        } else {
-          if(if_inserted) {
-            tmp_left_page->SetKeyAt(j, tmp_page->KeyAt(j - 1));
-            tmp_left_page->SetValueAt(j, tmp_page->ValueAt(j - 1));
-          } else {
-            tmp_left_page->SetKeyAt(j, tmp_page->KeyAt(j));
-            tmp_left_page->SetValueAt(j, tmp_page->ValueAt(j));
-          }
-        }
-      }
-      // size_t left_size = tmp_left_page->GetSize();
-      for(int j = 0; j + tmp_left_page->GetSize() < tmp_page->GetSize() + 1; j++) {
-        tmp_right_page->IncreaseSize(1);
-        if(j + tmp_left_page->GetSize() == childs[i + 1] + 1) {
-          tmp_right_page->SetKeyAt(j, split_key);
-          tmp_right_page->SetValueAt(j, right);
-          if_inserted = true;
-        } else {
-          if(if_inserted) {
-            tmp_right_page->SetKeyAt(j, tmp_page->KeyAt(j + tmp_left_page->GetSize() - 1));
-            tmp_right_page->SetValueAt(j, tmp_page->ValueAt(j + tmp_left_page->GetSize() - 1));
-          } else {
-            tmp_right_page->SetKeyAt(j, tmp_page->KeyAt(j + tmp_left_page->GetSize()));
-            tmp_right_page->SetValueAt(j, tmp_page->ValueAt(j + tmp_left_page->GetSize()));
-          }
-        }
-      }
-      PageCopy(tmp_guard, tmp_left_guard);
-      split_key = tmp_right_page->KeyAt(0);
-      left = tmp_id;
-      right = tmp_right_id;
-      bpm_->FlushPage(left);
-      bpm_->FlushPage(right);
-    }
-  }
-    // split without root
-  if(release_root) {
-    InternalPage *tmp = guards.front().AsMut<InternalPage>();
-    // std::cout << "tmp has a last size of " << tmp->GetSize() << std::endl;
-    tmp->IncreaseSize(1);
-    for(int i = tmp->GetSize() - 1; i > childs[1] + 1; i--) {
-      tmp->SetKeyAt(i, tmp->KeyAt(i - 1));
-      tmp->SetValueAt(i, tmp->ValueAt(i - 1));
-    }
-    tmp->SetKeyAt(childs[1] + 1, split_key);
-    tmp->SetValueAt(childs[1] + 1, right);
-    return true;
+  if (root_not_full) {
+    auto *root = guards.front().AsMut<InternalPage>();
+    InsertAtInternal(root, path[1], mid_key, right_id);
   } else {
-    // std::cout << "the root need to split" << std::endl;
-    // 不能不写else 前一步改right
-    // split with root
-    page_id_t new_root_id;
-    WritePageGuard new_root_guard = bpm_->NewPageGuarded(&new_root_id).UpgradeWrite();
-    InternalPage *new_root_page = new_root_guard.AsMut<InternalPage>();
-    new_root_page->Init(internal_max_size_);
-    new_root_page->SetSize(2);
-    new_root_page->SetValueAt(0, left);
-    new_root_page->SetValueAt(1, right);
-    new_root_page->SetKeyAt(1, split_key);
-    root_header_page->root_page_id_ = new_root_id;
-    bpm_->FlushPage(root_header_page->root_page_id_);
-    return true;
+    header->root_page_id_ = PromoteRoot(mid_key, left_id, right_id);
   }
-  guards.clear();
   return true;
 }
+INDEX_TEMPLATE_ARGUMENTS
+void BPLUSTREE_TYPE::InsertAtLeaf(LeafPage *node, int x, const KeyType &key, const ValueType &value) {
+  node->IncreaseSize(1);
+  for (int i = node->GetSize() - 1; i > x + 1; i--) {
+    node->SetKeyAt(i, node->KeyAt(i - 1));
+    node->SetValueAt(i, node->ValueAt(i - 1));
+  }
+  node->SetKeyAt(x + 1, key);
+  node->SetValueAt(x + 1, value);
+}
+INDEX_TEMPLATE_ARGUMENTS
+void BPLUSTREE_TYPE::InsertAtInternal(InternalPage *node, int x, const KeyType &key, page_id_t value) {
+  node->IncreaseSize(1);
+  for (int i = node->GetSize() - 1; i > x + 1; i--) {
+    node->SetKeyAt(i, node->KeyAt(i - 1));
+    node->SetValueAt(i, node->ValueAt(i - 1));
+  }
+  node->SetKeyAt(x + 1, key);
+  node->SetValueAt(x + 1, value);
+}
+INDEX_TEMPLATE_ARGUMENTS
+ std::tuple<KeyType, page_id_t, page_id_t> BPLUSTREE_TYPE::SplitAtLeaf(WritePageGuard& node_guard, int x, const KeyType& key, const ValueType& value) {
+  page_id_t node_id = node_guard.PageId();
+  LeafPage* node = node_guard.AsMut<LeafPage>();
+  page_id_t l_node_id, r_node_id; // l_node 只是临时缓存, 最后空间要还给 node
+  WritePageGuard l_node_guard = bpm_->NewPageGuarded(&l_node_id).UpgradeWrite();
+  WritePageGuard r_node_guard = bpm_->NewPageGuarded(&r_node_id).UpgradeWrite();
+  LeafPage *l_node = l_node_guard.AsMut<LeafPage>(), *r_node = r_node_guard.AsMut<LeafPage>();
+  l_node->Init(leaf_max_size_);
+  r_node->Init(leaf_max_size_);
+  for (int j = 0; j < l_node->GetMinSize(); j++) {
+    l_node->IncreaseSize(1);
+    if (j == x + 1) {
+      l_node->SetKeyAt(j, key);
+      l_node->SetValueAt(j, value);
+    } else {
+      l_node->SetKeyAt(j, 
+        node->KeyAt(j - (j > x)));
+      l_node->SetValueAt(j, 
+        node->ValueAt(j - (j > x)));
+    }
+  }
+  int l_size = l_node->GetSize();
+  for (int j = 0; j < node->GetSize() + 1 - l_size; j++) {
+    r_node->IncreaseSize(1);
+    if (j + l_size == x + 1) {
+      r_node->SetKeyAt(j, key);
+      r_node->SetValueAt(j, value);
+    } else {
+      r_node->SetKeyAt(j,
+        node->KeyAt(j + l_size - (j + l_size > x)));
+      r_node->SetValueAt(j,
+        node->ValueAt(j + l_size - (j + l_size > x)));
+    }
+  }
 
+  l_node->SetNextPageId(r_node_id);
+  r_node->SetNextPageId(node->GetNextPageId());
+  bpm_->FlushPage(node_id);
+  bpm_->FlushPage(r_node_id);
+  PageCopy(node_guard, l_node_guard);
+
+  return std::make_tuple(r_node->KeyAt(0), node_id, r_node_id);
+}
+INDEX_TEMPLATE_ARGUMENTS
+ std::tuple<KeyType, page_id_t, page_id_t> BPLUSTREE_TYPE::SplitAtInternal(WritePageGuard& node_guard, int x, const KeyType& key, page_id_t value /* child page_id */) {
+  page_id_t node_id = node_guard.PageId();
+  InternalPage* node = node_guard.AsMut<InternalPage>();
+  page_id_t l_node_id, r_node_id;
+  WritePageGuard l_node_guard = bpm_->NewPageGuarded(&l_node_id).UpgradeWrite();
+  WritePageGuard r_node_guard = bpm_->NewPageGuarded(&r_node_id).UpgradeWrite();
+  InternalPage *l_node = l_node_guard.AsMut<InternalPage>(), *r_node = r_node_guard.AsMut<InternalPage>();
+  l_node->Init(internal_max_size_), r_node->Init(internal_max_size_);
+  l_node->SetSize(0), r_node->SetSize(0); 
+
+  for (int j = 0; j < l_node->GetMinSize(); j++) {
+    l_node->IncreaseSize(1);
+    if (j == x + 1) {
+      l_node->SetKeyAt(j, key);
+      l_node->SetValueAt(j, value);
+    } else {
+      l_node->SetKeyAt(j, 
+        node->KeyAt(j - (j > x)));
+      l_node->SetValueAt(j, 
+        node->ValueAt(j - (j > x)));
+    }
+  }
+  int l_size = l_node->GetSize();
+  for (int j = 0; j < node->GetSize() + 1 - l_size; j++) {
+    r_node->IncreaseSize(1);
+    if (j + l_size == x + 1) {
+      r_node->SetKeyAt(j, key);
+      r_node->SetValueAt(j, value);
+    } else {
+      r_node->SetKeyAt(j,
+        node->KeyAt(j + l_size - (j + l_size > x)));
+      r_node->SetValueAt(j,
+        node->ValueAt(j + l_size - (j + l_size > x)));
+    }
+  }
+  PageCopy(node_guard, l_node_guard);
+  bpm_->FlushPage(node_id);
+  bpm_->FlushPage(r_node_id);
+  return std::make_tuple(r_node->KeyAt(0), node_id, r_node_id); // 从代码来看，0 处是有内存空间的。
+}
+INDEX_TEMPLATE_ARGUMENTS
+page_id_t BPLUSTREE_TYPE::PromoteRoot(const KeyType& key, page_id_t l_child, page_id_t r_child) {
+  page_id_t root_id;
+  WritePageGuard root_guard = bpm_->NewPageGuarded(&root_id).UpgradeWrite();
+  InternalPage *root = root_guard.AsMut<InternalPage>();
+  root->Init(internal_max_size_);
+  root->SetSize(2);
+  root->SetKeyAt(1, key);
+  root->SetValueAt(0, l_child);
+  root->SetValueAt(1, r_child);
+  bpm_->FlushPage(root_id);
+  return root_id;
+}
 
 
 
@@ -360,231 +327,189 @@ auto BPLUSTREE_TYPE::Insert(const KeyType& key, const ValueType& value,
 INDEX_TEMPLATE_ARGUMENTS
 void BPLUSTREE_TYPE::Remove(const KeyType& key, Transaction* txn)
 {
-  //Your code here
-  // empty
   WritePageGuard header_guard = bpm_->FetchPageWrite(header_page_id_);
-  auto root_header_page = header_guard.template AsMut<BPlusTreeHeaderPage> ();
-  bool is_empty = (root_header_page->root_page_id_ == INVALID_PAGE_ID);
-  if(is_empty)
+  BPlusTreeHeaderPage *header = header_guard.AsMut<BPlusTreeHeaderPage>();
+  if (header->root_page_id_ == INVALID_PAGE_ID) 
     return;
-  // find 
   std::deque<WritePageGuard> guards;
-  std::deque<int> childs;
-  childs.push_back(-1);
-  guards.push_back(std::move(bpm_->FetchPageWrite(root_header_page->root_page_id_)));
-  const BPlusTreePage* root = header_guard.As<BPlusTreePage>();
-  bool release_root = root->GetMinSize() < root->GetSize();
-  if(root->GetMinSize() < root->GetSize())
+  guards.push_back(std::move(bpm_ -> FetchPageWrite(header->root_page_id_)));
+  const BPlusTreePage* root_general = guards.front().As<BPlusTreePage>();
+  bool root_released = (root_general->GetSize() != 2); // whether root is full and will split after insert
+  if (root_released)
     header_guard.Drop();
-  InternalPage *tmp = guards.back().AsMut<InternalPage>();
-  while(!tmp->IsLeafPage()) {
-    int new_tmp = BinaryFind(tmp, key);
-    guards.push_back(std::move(bpm_->FetchPageWrite(tmp->ValueAt(new_tmp))));
-    childs.push_back(new_tmp);
-    tmp = guards.back().AsMut<InternalPage>();
-    if(!tmp->IsLeafPage() && (tmp->GetSize() > tmp->GetMinSize())) {
-      if(release_root) {
-        header_guard.Drop();
-        release_root = true;
-      }
-      while(guards.size() > 1) {
+  std::deque<int> target_childs(1, -1);
+  InternalPage* node = guards.back().AsMut<InternalPage>();
+  while (!node->IsLeafPage()) {
+    int target_child = BinaryFind(node, key);
+    target_childs.push_back(target_child);
+    guards.push_back(std::move(
+      bpm_ -> FetchPageWrite(node->ValueAt(target_child))
+    ));
+    node = guards.back().AsMut<InternalPage>();
+    if (!node->IsLeafPage() && node->GetSize() > node->GetMinSize())
+      while (guards.size() > 1) {
+        target_childs.pop_front();
         guards.pop_front();
-        childs.pop_front();
-      }
-    }
-  }
-  WritePageGuard& target_leaf = guards.back();
-  LeafPage *leaf_page = target_leaf.AsMut<LeafPage>();
-  int leaf_pos = BinaryFind(leaf_page, key);
-  if(leaf_pos == -1 || comparator_(key, leaf_page->KeyAt(leaf_pos)) != 0)
-    return;
-  for (int i = leaf_pos; i < leaf_page->GetSize() - 1; i++) {
-    leaf_page->SetKeyAt(i, leaf_page->KeyAt(i + 1));
-    leaf_page->SetValueAt(i, leaf_page->ValueAt(i + 1));
-  }
-  leaf_page->IncreaseSize(-1);
-  // without split
-  if(leaf_page->GetSize() > leaf_page->GetMinSize() || root->IsLeafPage()) {
-    if(!release_root) {
-      header_guard.Drop();
-      release_root = true;
-    }
-    while(guards.size() > 1) {
-      guards.pop_front();
-    }
-    if(root->IsLeafPage() && leaf_page->GetSize() == 0)
-      root_header_page->root_page_id_ = INVALID_PAGE_ID;
-    return;
-  }
-  //with split
-  // 向右借->向左借->merge
-  InternalPage *parent = guards[guards.size() - 2].AsMut<InternalPage>();
-  int leaf_pos_out = childs.back();
-  int brother_pos;
-  if(leaf_pos_out == parent->GetSize() - 1)
-    brother_pos = leaf_pos_out - 1;
-  else
-    brother_pos = leaf_pos_out + 1;
-  WritePageGuard brother_guard = bpm_->FetchPageWrite(parent->ValueAt(brother_pos));
-  LeafPage *brother_page = brother_guard.AsMut<LeafPage>();
-    // borrow brother's
-  page_id_t new_id = INVALID_PAGE_ID;
-  if(brother_page->GetSize() > brother_page->GetMinSize()) {
-    if(!release_root) {
-      release_root = true;
-      header_guard.Drop();
-    }
-    if(brother_pos == leaf_pos_out - 1) // borrow left brother
-      borrow(brother_page, leaf_page, parent, true, leaf_pos_out);
-    else // borrow right brother
-      borrow(brother_page, leaf_page, parent, false, brother_pos);
-  } else {
-    // by merge
-    if(brother_pos == leaf_pos_out - 1) // borrow left brother
-      new_id = merge(brother_guard, target_leaf, parent, brother_pos);
-    else
-      new_id = merge(target_leaf, brother_guard, parent, leaf_pos_out);
-    for(int i = guards.size() - 2; i > 0; i--) {
-      InternalPage *parent = guards[i - 1].AsMut<InternalPage>();
-      InternalPage *tmp_page = guards[i].AsMut<InternalPage>();
-      WritePageGuard &tmp_guard = guards[i];
-      int tmp_pos = childs[i];
-      int brother_pos;
-      if(tmp_pos == parent->GetSize() - 1) // borrow from brother on the left
-        brother_pos = tmp_pos - 1;
-      else 
-        brother_pos = tmp_pos + 1; // borrow from brother on the right
-      WritePageGuard brother_guard = bpm_->FetchPageWrite(parent->ValueAt(brother_pos));
-      InternalPage *brother_page = brother_guard.AsMut<InternalPage>();
-      if(brother_page->GetSize() > brother_page->GetMinSize())  {
-        if(!release_root) {
+        if (!root_released) {
           header_guard.Drop();
-          release_root = true;
+          root_released = true;
         }
-        if(brother_pos == tmp_pos - 1) // borrow from left brother
-          borrow(brother_page, tmp_page, parent, true, brother_pos);
-        else // borrow from right brother
-          borrow(brother_page, tmp_page, parent, false, tmp_pos);
-        break;
-      } else {
-        if(brother_pos == tmp_pos - 1) // merge with left brother
-          new_id = Internalmerge(brother_guard, tmp_guard, parent, brother_pos);
-        else // merge with right brother
-          new_id = Internalmerge(tmp_guard, brother_guard, parent, tmp_pos);
-      }    
-    }
+      }
   }
-  if(!release_root) 
-    root_header_page->root_page_id_ = new_id;
-}
+  WritePageGuard& leaf_guard = guards.back();
+  LeafPage* leaf = leaf_guard.AsMut<LeafPage>();
+  int target_position = BinaryFind(leaf, key);
+  if (target_position == -1 || comparator_(leaf->KeyAt(target_position), key) != 0) 
+    return;
+  EraseAtLeaf(leaf, target_position); 
+  if (leaf->GetSize() >= leaf->GetMinSize() || root_general->IsLeafPage()) { 
+    while (guards.size() > 1)
+      guards.pop_front();
+    if (root_general->IsLeafPage() && leaf->GetSize() == 0) 
+      header->root_page_id_ = INVALID_PAGE_ID;
+  } else { 
+    page_id_t new_node = INVALID_PAGE_ID;
+    InternalPage* parent = guards[guards.size() - 2].AsMut<InternalPage>();
+    int leaf_pos = target_childs.back();
+    int sibling_dir = leaf_pos != parent->GetSize() - 1 ? 1 : -1;
+    int sibling_pos = leaf_pos + sibling_dir;
+    WritePageGuard sibling_guard = bpm_ -> FetchPageWrite(parent->ValueAt(sibling_pos));
+    LeafPage* sibling = sibling_guard.AsMut<LeafPage>();
+    if (sibling->GetSize() > sibling->GetMinSize()) {
+      if (sibling_dir > 0)
+        BorrowAtLeaf(leaf, sibling, 1, parent, sibling_pos);
+      else 
+        BorrowAtLeaf(sibling, leaf, -1, parent, leaf_pos);
+      if (!root_released) {
+        header_guard.Drop();
+        root_released = true; 
+      }
+    } else {
+      if (sibling_dir > 0) 
+        new_node = MergeAtLeaf(leaf_guard, sibling_guard, parent, leaf_pos);
+      else 
+        new_node = MergeAtLeaf(sibling_guard, leaf_guard, parent, sibling_pos);
 
-INDEX_TEMPLATE_ARGUMENTS
-void BPLUSTREE_TYPE::borrow(LeafPage *lender, LeafPage *receiver, InternalPage *parent, bool leftmost, int &pos) {
-  if (leftmost) { // borrow from brother on the left
-    receiver->IncreaseSize(1);
-    for(int i = 0; i < receiver->GetSize() - 1; i++) {
-      receiver->SetKeyAt(i + 1, receiver->KeyAt(i));
-      receiver->SetValueAt(i + 1, receiver->ValueAt(i));
+      for (int i = guards.size() - 2; i >= 1; i--) {
+        InternalPage* parent = guards[i - 1].AsMut<InternalPage>();
+        WritePageGuard& node_guard = guards[i];
+        InternalPage* node = node_guard.AsMut<InternalPage>();
+        int node_pos = target_childs[i]; 
+        int sibling_dir = node_pos != parent->GetSize() - 1 ? 1 : -1; 
+        int sibling_pos = node_pos + sibling_dir;
+        WritePageGuard sibling_guard = bpm_->FetchPageWrite(parent->ValueAt(sibling_pos));
+        InternalPage* sibling = sibling_guard.AsMut<InternalPage>();
+        if (sibling->GetSize() > sibling->GetMinSize()) {
+          if (sibling_dir > 0)
+            BorrowAtInternal(node, sibling, 1, parent, sibling_pos);
+          else 
+            BorrowAtInternal(sibling, node, -1, parent, node_pos);
+          if (!root_released) {
+            header_guard.Drop();
+            root_released = true; 
+          }
+          break;
+        } else {
+          if (sibling_dir > 0)
+            new_node = MergeAtInternal(node_guard, sibling_guard, parent, node_pos);
+          else
+            new_node = MergeAtInternal(sibling_guard, node_guard, parent, sibling_pos);
+        }
+      }
+      if (!root_released)
+          header->root_page_id_ = new_node;
     }
-    receiver->SetKeyAt(0, lender->KeyAt(lender->GetSize() - 1));
-    receiver->SetValueAt(0, lender->ValueAt(lender->GetSize() - 1));
-    lender->IncreaseSize(-1);
-    parent->SetKeyAt(pos, receiver->KeyAt(0));
-  } else { // borrow from brother on the right
-    receiver->IncreaseSize(1);
-    receiver->SetKeyAt(receiver->GetSize() - 1, lender->KeyAt(0));
-    receiver->SetValueAt(receiver->GetSize() - 1, lender->ValueAt(0));
-    for(int i = 0; i < lender->GetSize() - 1; i++) {
-      lender->SetKeyAt(i, lender->KeyAt(i + 1));
-      lender->SetValueAt(i, lender->ValueAt(i + 1));
-    }
-    lender->IncreaseSize(-1);
-    parent->SetKeyAt(pos, lender->KeyAt(0));
-  }
-}
-
-INDEX_TEMPLATE_ARGUMENTS
-page_id_t BPLUSTREE_TYPE::merge(WritePageGuard &left, WritePageGuard& right, InternalPage *parent, int &pos) {
-  page_id_t left_id = left.PageId();
-  page_id_t new_id;
-  WritePageGuard new_guard = bpm_->NewPageGuarded(&new_id).UpgradeWrite();
-  LeafPage *left_page = left.AsMut<LeafPage>();
-  LeafPage *right_page = right.AsMut<LeafPage>();
-  LeafPage *new_page = new_guard.AsMut<LeafPage>();
-  new_page->Init(leaf_max_size_);
-  new_page->SetSize(left_page->GetSize() + right_page->GetSize());
-  for(int i = 0; i < left_page->GetSize(); i++) {
-    new_page->SetKeyAt(i, left_page->KeyAt(i));
-    new_page->SetValueAt(i, left_page->ValueAt(i));
-  }
-  for(int i = 0; i < right_page->GetSize(); i++) {
-    new_page->SetKeyAt(i + left_page->GetSize(), right_page->KeyAt(i));
-    new_page->SetValueAt(i + left_page->GetSize(), right_page->ValueAt(i));
-  }
-  for(int i = pos + 1; i < parent->GetSize() - 1; i++) {
-    parent->SetKeyAt(i, parent->KeyAt(i + 1));
-    parent->SetValueAt(i, parent->ValueAt(i + 1));
-  }
-  parent->IncreaseSize(-1);
-  parent->SetKeyAt(pos, new_page->KeyAt(0));
-  new_page->SetNextPageId(right_page->GetNextPageId());
-  PageCopy(left, new_guard);
-  bpm_->FlushPage(left_id);
-  return left_id;
-}
-
-INDEX_TEMPLATE_ARGUMENTS
-void BPLUSTREE_TYPE::borrow(InternalPage *lender, InternalPage *receiver, InternalPage *parent, bool leftmost, int &pos) {
-  if (leftmost) { // borrow from brother on the left
-    receiver->IncreaseSize(1);
-    for(int i = 0; i < receiver->GetSize() - 1; i++) {
-      receiver->SetKeyAt(i + 1, receiver->KeyAt(i));
-      receiver->SetValueAt(i + 1, receiver->ValueAt(i));
-    }
-    receiver->SetKeyAt(0, lender->KeyAt(lender->GetSize() - 1));
-    receiver->SetValueAt(0, lender->ValueAt(lender->GetSize() - 1));
-    lender->IncreaseSize(-1);
-    parent->SetKeyAt(pos, receiver->KeyAt(0));
-  } else { // borrow from brother on the right
-    receiver->IncreaseSize(1);
-    receiver->SetKeyAt(receiver->GetSize() - 1, lender->KeyAt(0));
-    receiver->SetValueAt(receiver->GetSize() - 1, lender->ValueAt(0));
-    for(int i = 0; i < lender->GetSize() - 1; i++) {
-      lender->SetKeyAt(i, lender->KeyAt(i + 1));
-      lender->SetValueAt(i, lender->ValueAt(i + 1));
-    }
-    lender->IncreaseSize(-1);
-    parent->SetKeyAt(pos, lender->KeyAt(0));
   }
 }
 
+
 INDEX_TEMPLATE_ARGUMENTS
-page_id_t BPLUSTREE_TYPE::Internalmerge(WritePageGuard &left, WritePageGuard& right, InternalPage *parent, int &pos) {
-  page_id_t left_id = left.PageId();
-  page_id_t new_id;
-  WritePageGuard new_guard = bpm_->NewPageGuarded(&new_id).UpgradeWrite();
-  InternalPage *left_page = left.AsMut<InternalPage>();
-  InternalPage *right_page = right.AsMut<InternalPage>();
-  InternalPage *new_page = new_guard.AsMut<InternalPage>();
-  new_page->Init(internal_max_size_);
-  new_page->SetSize(left_page->GetSize() + right_page->GetSize());
-  for(int i = 0; i < left_page->GetSize(); i++) {
-    new_page->SetKeyAt(i, left_page->KeyAt(i));
-    new_page->SetValueAt(i, left_page->ValueAt(i));
+void BPLUSTREE_TYPE::EraseAtLeaf(LeafPage *node, int x) {
+  for (int i = x; i < node->GetSize() - 1; i++) {
+    node->SetKeyAt(i, node->KeyAt(i + 1));
+    node->SetValueAt(i, node->ValueAt(i + 1));
   }
-  for(int i = 0; i < right_page->GetSize(); i++) {
-    new_page->SetKeyAt(i + left_page->GetSize(), right_page->KeyAt(i));
-    new_page->SetValueAt(i + left_page->GetSize(), right_page->ValueAt(i));
+  node->IncreaseSize(-1);
+}
+
+INDEX_TEMPLATE_ARGUMENTS
+void BPLUSTREE_TYPE::EraseAtInternal(InternalPage *node, int x) {
+  for (int i = x; i < node->GetSize() - 1; i++) {
+    node->SetKeyAt(i, node->KeyAt(i + 1));
+    node->SetValueAt(i, node->ValueAt(i + 1));
   }
-  for(int i = pos + 1; i < parent->GetSize() - 1; i++) {
-    parent->SetKeyAt(i, parent->KeyAt(i + 1));
-    parent->SetValueAt(i, parent->ValueAt(i + 1));
+  node->IncreaseSize(-1);
+}
+INDEX_TEMPLATE_ARGUMENTS
+void BPLUSTREE_TYPE::BorrowAtLeaf(LeafPage* l_node, LeafPage* r_node, int sibling_dir, InternalPage *parent, int y) {
+  if (sibling_dir == 1) {
+    InsertAtLeaf(l_node, l_node->GetSize() - 1, r_node->KeyAt(0), r_node->ValueAt(0));
+    EraseAtLeaf(r_node, 0);
+    parent->SetKeyAt(y, r_node->KeyAt(0));
+  } else {
+    InsertAtLeaf(r_node, -1, l_node->KeyAt(l_node->GetSize() - 1), l_node->ValueAt(l_node->GetSize() - 1)); 
+    EraseAtLeaf(l_node, l_node->GetSize() - 1);
+    parent->SetKeyAt(y, r_node->KeyAt(0));
   }
-  parent->IncreaseSize(-1);
-  parent->SetKeyAt(pos, new_page->KeyAt(0));
-  PageCopy(left, new_guard);
-  bpm_->FlushPage(left_id);
-  return left_id;
+}
+INDEX_TEMPLATE_ARGUMENTS
+void BPLUSTREE_TYPE::BorrowAtInternal(InternalPage *l_node, InternalPage *r_node, int sibling_dir, InternalPage *parent, int y ) {
+  if (sibling_dir == 1) { 
+    InsertAtInternal(l_node, l_node->GetSize() - 1, r_node->KeyAt(0), r_node->ValueAt(0));
+    EraseAtInternal(r_node, 0);
+    parent->SetKeyAt(y, r_node->KeyAt(0));
+  } else {
+    InsertAtInternal(r_node, -1, l_node->KeyAt(l_node->GetSize() - 1), l_node->ValueAt(l_node->GetSize() - 1)); 
+    EraseAtInternal(l_node, l_node->GetSize() - 1);
+    parent->SetKeyAt(y, r_node->KeyAt(0));
+  }
+}
+INDEX_TEMPLATE_ARGUMENTS
+page_id_t BPLUSTREE_TYPE::MergeAtLeaf(WritePageGuard& l_node_guard, WritePageGuard& r_node_guard, InternalPage *parent, int x) {
+  page_id_t l_node_id = l_node_guard.PageId();
+  LeafPage* l_node = l_node_guard.AsMut<LeafPage>(), *r_node = r_node_guard.AsMut<LeafPage>();
+  page_id_t node_id;
+  WritePageGuard node_guard = bpm_ -> NewPageGuarded(&node_id).UpgradeWrite();
+  LeafPage *node = node_guard.AsMut<LeafPage>();
+  node->Init(leaf_max_size_);
+  node->SetSize(l_node->GetSize() + r_node->GetSize());
+  for (int j = 0; j < l_node->GetSize(); j++) {
+    node->SetKeyAt(j, l_node->KeyAt(j));
+    node->SetValueAt(j, l_node->ValueAt(j));
+  }
+  int l_size = l_node->GetSize();
+  for (int j = 0; j < r_node->GetSize(); j++) {
+    node->SetKeyAt(j + l_size, r_node->KeyAt(j));
+    node->SetValueAt(j + l_size, r_node->ValueAt(j));
+  }
+  EraseAtInternal(parent, x + 1);
+  parent->SetKeyAt(x, node->KeyAt(0));
+  node->SetNextPageId(r_node->GetNextPageId());
+  PageCopy(l_node_guard, node_guard);
+  return l_node_id;
+}
+INDEX_TEMPLATE_ARGUMENTS
+page_id_t BPLUSTREE_TYPE::MergeAtInternal(WritePageGuard& l_node_guard, WritePageGuard& r_node_guard, InternalPage *parent, int x) {
+  page_id_t l_node_id = l_node_guard.PageId();
+  InternalPage* l_node = l_node_guard.AsMut<InternalPage>(), *r_node = r_node_guard.AsMut<InternalPage>();
+  page_id_t node_id;
+  WritePageGuard node_guard = bpm_ -> NewPageGuarded(&node_id).UpgradeWrite();
+  InternalPage *node = node_guard.AsMut<InternalPage>();
+  node->Init(internal_max_size_);
+node->SetSize(l_node->GetSize() + r_node->GetSize());
+  for (int j = 0; j < l_node->GetSize(); j++) {
+    node->SetKeyAt(j, l_node->KeyAt(j));
+    node->SetValueAt(j, l_node->ValueAt(j));
+  }
+  int l_size = l_node->GetSize();
+  for (int j = 0; j < r_node->GetSize(); j++) {
+    node->SetKeyAt(j + l_size, r_node->KeyAt(j));
+    node->SetValueAt(j + l_size, r_node->ValueAt(j));
+  }
+  EraseAtInternal(parent, x + 1);
+  parent->SetKeyAt(x, node->KeyAt(0));
+  PageCopy(l_node_guard, node_guard);
+  return l_node_id;
 }
 /*****************************************************************************
  * INDEX ITERATOR
@@ -604,7 +529,7 @@ auto BPLUSTREE_TYPE::BinaryFind(const LeafPage* leaf_page, const KeyType& key)
     {
       l = mid;
     }
-    else
+    else 
     {
       r = mid - 1;
     }
@@ -627,7 +552,7 @@ auto BPLUSTREE_TYPE::BinaryFind(const InternalPage* internal_page,
   while (l < r)
   {
     int mid = (l + r + 1) >> 1;
-    if (comparator_(internal_page -> KeyAt(mid), key) != 1)
+    if (comparator_(internal_page -> KeyAt(mid), key) != 1) 
     {
       l = mid;
     }

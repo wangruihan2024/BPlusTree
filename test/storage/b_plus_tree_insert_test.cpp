@@ -87,14 +87,15 @@ TEST(BPlusTreeTests, InsertTest2) {
   RID rid;
   // create transaction
   auto *transaction = new Transaction(0);
-
+  // std::vector<int64_t> keys = {1, 10, 37, 20, 24, 11, 4, 30, 31, 44, 17, 21, 40, 3, 6, 23, 29, 2, 16, 7, 19, 32, 25, 43, 41, 22, 9, 28, 18, 33, 42, 39, 13, 5, 35, 14, 26, 38, 46, 15, 12, 45, 34, 36, 27, 8};
   std::vector<int64_t> keys = {1, 2, 3, 4, 5};
   for (auto key : keys) {
     int64_t value = key & 0xFFFFFFFF;
     rid.Set(static_cast<int32_t>(key >> 32), value);
     index_key.SetFromInteger(key);
     tree.Insert(index_key, rid, transaction);
-    
+    // std::cout << key << std::endl;
+    // tree.Print(bpm);
   }
 
   std::vector<RID> rids;
@@ -221,7 +222,7 @@ TEST(BPlusTreeTests, InsertTest4)
     rid.Set(static_cast<int32_t>(key >> 32), value);
     index_key.SetFromInteger(key);
     // std::cout << "the value is" << value << std::endl;
-    // std::cout << "the key is" << key << std::endl;
+    std::cout << "the key is" << key << std::endl;
     // std::cout << "the index_key is" << index_key << std::endl;
     tree.Insert(index_key, rid, transaction);
   }
