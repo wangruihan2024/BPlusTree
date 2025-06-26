@@ -321,10 +321,13 @@ INDEX_TEMPLATE_ARGUMENTS
       l_node->SetKeyAt(j, key);
       l_node->SetValueAt(j, value);
     } else {
-      l_node->SetKeyAt(j, 
-        node->KeyAt(j - (j > x)));
-      l_node->SetValueAt(j, 
-        node->ValueAt(j - (j > x)));
+      if(j > x) {
+        l_node->SetKeyAt(j, node->KeyAt(j - 1));
+        l_node->SetValueAt(j, node->ValueAt(j - 1));
+      } else {
+        l_node->SetKeyAt(j, node->KeyAt(j));
+        l_node->SetValueAt(j, node->ValueAt(j));
+      }
     }
   }
   int l_size = l_node->GetSize();
@@ -334,19 +337,20 @@ INDEX_TEMPLATE_ARGUMENTS
       r_node->SetKeyAt(j, key);
       r_node->SetValueAt(j, value);
     } else {
-      r_node->SetKeyAt(j,
-        node->KeyAt(j + l_size - (j + l_size > x)));
-      r_node->SetValueAt(j,
-        node->ValueAt(j + l_size - (j + l_size > x)));
+      if(j + l_size > x) {
+        r_node->SetKeyAt(j, node->KeyAt(j + l_size - 1));
+        r_node->SetValueAt(j, node->ValueAt(j + l_size - 1));
+      } else {
+        r_node->SetKeyAt(j, node->KeyAt(j + l_size));
+        r_node->SetValueAt(j, node->ValueAt(j + l_size));
+      } 
     }
   }
-
   l_node->SetNextPageId(r_node_id);
   r_node->SetNextPageId(node->GetNextPageId());
   bpm_->FlushPage(node_id);
   bpm_->FlushPage(r_node_id);
   PageCopy(node_guard, l_node_guard);
-
   return std::make_tuple(r_node->KeyAt(0), node_id, r_node_id);
 }
 INDEX_TEMPLATE_ARGUMENTS
@@ -366,10 +370,13 @@ INDEX_TEMPLATE_ARGUMENTS
       l_node->SetKeyAt(j, key);
       l_node->SetValueAt(j, value);
     } else {
-      l_node->SetKeyAt(j, 
-        node->KeyAt(j - (j > x)));
-      l_node->SetValueAt(j, 
-        node->ValueAt(j - (j > x)));
+      if(j > x) {
+        l_node->SetKeyAt(j, node->KeyAt(j - 1));
+        l_node->SetValueAt(j, node->ValueAt(j - 1));
+      } else {
+        l_node->SetKeyAt(j, node->KeyAt(j));
+        l_node->SetValueAt(j, node->ValueAt(j));
+      }
     }
   }
   int l_size = l_node->GetSize();
@@ -379,10 +386,13 @@ INDEX_TEMPLATE_ARGUMENTS
       r_node->SetKeyAt(j, key);
       r_node->SetValueAt(j, value);
     } else {
-      r_node->SetKeyAt(j,
-        node->KeyAt(j + l_size - (j + l_size > x)));
-      r_node->SetValueAt(j,
-        node->ValueAt(j + l_size - (j + l_size > x)));
+      if(j + l_size > x) {
+        r_node->SetKeyAt(j, node->KeyAt(j + l_size - 1));
+        r_node->SetValueAt(j, node->ValueAt(j + l_size - 1));
+      } else {
+        r_node->SetKeyAt(j, node->KeyAt(j + l_size));
+        r_node->SetValueAt(j, node->ValueAt(j + l_size));
+      }
     }
   }
   PageCopy(node_guard, l_node_guard);
